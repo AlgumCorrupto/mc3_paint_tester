@@ -1,0 +1,17 @@
+78098b89c88a74ebe8c20117b8754620
+::res://::1795346493
+export_presets.cfg::TextFile::-1::1795346493::0::1::::<><><>0<>0<><>::
+main.gd::GDScript::5543161384724333286::1795345554::0::1::::<>Node3D<><>0<>0<><>::
+main.tscn::PackedScene::-1::1795331336::0::1::::<><><>0<>0<><>::res://main.gd
+README.md::TextFile::-1::1795356246::0::1::::<><><>0<>0<><>::
+::res://docs/::1795346492
+MC3 Car Paint Tester.apple-touch-icon.png::CompressedTexture2D::4518562307644630753::1795346492::1795346496::1::::<><><>0<>0<>d3cb624966dad4ebc3c97ccdc02d8cfa<>res://.godot/imported/MC3 Car Paint Tester.apple-touch-icon.png-277c377a58023f2b01d136475227da01.ctex::
+MC3 Car Paint Tester.icon.png::CompressedTexture2D::3457323525719680869::1795346492::1795346496::1::::<><><>0<>0<>6868ce817427010c909f126885649937<>res://.godot/imported/MC3 Car Paint Tester.icon.png-016b882189337bafc07e3ddb1335c707.ctex::
+MC3 Car Paint Tester.png::CompressedTexture2D::6849157086065700417::1795346492::1795346496::1::::<><><>0<>0<>e63c87e696baea0d4458a2aa9d4bd247<>res://.godot/imported/MC3 Car Paint Tester.png-b6efb9111c3e7d8e35196f091d241e9f.ctex::
+::res://model/::1795345493
+license.txt::TextFile::-1::1795331338::0::1::::<><><>0<>0<><>::
+scene.gltf::PackedScene::6439239075227977607::1795331338::1795345493::1::::<><><>0<>0<>abaf2a03f016b674738a6f4edf09ce50<>res://.godot/imported/scene.gltf-dd9adc44db4569034f5cdc7a1acce94d.scn::
+::res://shaders/::1795345492
+car_paint.gdshader::Shader::5122101471356652792::1795356220::0::1::::<><><>0<>0<><>::
+env_map.gdshader::Shader::6195113709200386280::1795331356::0::1::::<><><>0<>0<><>::
+paint_map.gdshader::Shader::3534266602084658238::1795331356::0::1::::<><><>0<>0<><>::
