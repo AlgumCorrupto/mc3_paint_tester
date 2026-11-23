@@ -13,15 +13,20 @@ render_mode blend_disabled;
 //     a per-vertex Fresnel-like term. In the capture it is a flat ~0.36.
 //
 // The original panorama is a game asset, so a procedural garage-like one is generated
-// here. A custom image can be supplied through pano_tex.
+// here. Any equirectangular image can be supplied through pano_tex (use mipmaps).
 
 const int MAX_DOTS = 12;
 
 uniform float heading = 0.0;                       // panorama u offset (turns)
-uniform float pano_gain = 1.0;
+uniform float pano_gain = 2.0;
+uniform bool flip_pano_v = false;                 // upside-down panorama (see README: up-facing normals read the lower half)
+// Physically oriented mode: the reflection shows what is BEHIND the camera, using the same equirect
+// convention as Godot's PanoramaSkyMaterial (so the panorama can double as the scene background).
+uniform bool match_sky = false;
+uniform float pano_v_offset = 0.0;                 // asin(camera forward.y) / pi
 uniform vec3 sky_color = vec3(0.10, 0.105, 0.11);  // what is under the panorama
 uniform bool use_custom_pano = false;
-uniform sampler2D pano_tex : filter_linear, repeat_enable;
+uniform sampler2D pano_tex : filter_linear_mipmap, repeat_enable;
 uniform float reflect_alpha = 0.361;
 
 // 12x1 RGBAF texture: xy = dot centre (UV), z = dot half-size (UV), w = alpha
@@ -82,7 +87,14 @@ vec3 procedural_pano(vec2 uv) {
 }
 
 void fragment() {
-	vec2 pu = vec2(UV.x + heading, UV.y);
+	vec2 pu;
+	if (match_sky) {
+		// u: mirrored (a normal tilted to the viewer's right reflects the viewer's right-behind),
+		// v: up-facing normals read the top of the panorama, shifted by the camera pitch
+		pu = vec2(1.0 - UV.x - heading, clamp((1.0 - UV.y) + pano_v_offset, 0.0, 1.0));
+	} else {
+		pu = vec2(UV.x + heading, flip_pano_v ? 1.0 - UV.y : UV.y);
+	}
 	vec3 pano = use_custom_pano ? texture(pano_tex, pu).rgb : procedural_pano(pu);
 	vec3 col = sky_color + pano * 0.5 * pano_gain;   // 3619 adds the panorama at vertex alpha 0.5
 	float alpha = reflect_alpha;
