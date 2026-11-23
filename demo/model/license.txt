@@ -1,0 +1,11 @@
+Model Information:
+* title:	Paint tester
+* source:	https://sketchfab.com/3d-models/paint-tester-72688c1de13348199dda4899b261b5b7
+* author:	tifaiter (https://sketchfab.com/tifaiter126)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Paint tester" (https://sketchfab.com/3d-models/paint-tester-72688c1de13348199dda4899b261b5b7) by tifaiter (https://sketchfab.com/tifaiter126) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
