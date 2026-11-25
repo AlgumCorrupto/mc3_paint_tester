@@ -11,20 +11,43 @@ extends Node3D
 ##   group "mc3_glass"           -> alpha blended coloured glass, [member glass_tint] / [member glass_opacity]
 ##   group "mc3_headlight_glass" -> glass that lights up with [member headlights_on]
 ##   group "mc3_brakelight_glass"-> glass that lights up with [member headlights_on] + [member brakelights_on]
+##   group "mc3_interior"        -> flat, unshaded, pitch black interior material
+##   group "mc3_paint"           -> car paint on the whole mesh (also in material name mode)
 ##   group "mc3_paint_ignore"    -> skipped
 ## (a group on a parent node applies to all meshes below it)
+##
+## Material name mode ([member assign_by_material_name]): for models whose materials are named after the game's
+## shaders ("05 - carpaint", "2E - chrome", "17 - colored_glass", ...) the shader is picked PER SURFACE from the
+## material name. Surfaces whose shader is not implemented keep their own material.
 ##
 ## Car paint:  paint map (256x256, one glow sprite per light) + env map (256x256, panorama + light glows),
 ##             combined by a shader that does normal indexed (matcap style) lookups.
 ## Chrome:     the same env map, modulated by vertex lighting and a tint.
 ## Glass:      flat tint + Fresnel weighted env map reflection, alpha blended.
+## Interior:   flat unshaded black.
+## The car paint has the game's six finishes (see [enum PaintType]); Matte is the car paint without env reflection.
 ## Paint and chrome were verified against an Xbox capture, glass was rebuilt from one (see README).
 ##
 ## Lights: every OmniLight3D / SpotLight3D in the scene is used automatically (the game uses the 10 closest
 ## lights), plus [member light_sources] and an optional light attached to the camera.
 ## Works at run time only (it needs the active camera).
 
-enum PaintType { METALLIC, PEARL, GLOSS }
+## The game's paint type ids (mcCarPaintJob::m_paintType, garage names Gloss, Metallic, ColorShift, Pearlescent,
+## Matte, Enamel). Matte is the car paint with the env reflection switched off.
+enum PaintType { GLOSS, METALLIC, COLORSHIFT, PEARLESCENT, MATTE, ENAMEL }
+
+## mcCarPaintJob::sm_paintTypeInfo, one record per PaintType (read from the constructor of the PS2 build).
+## size / intensity: highlight sprite; fresnel = (position weight, min, max, scale) = c146 (the Xbox build stores
+## min / max / scale at half the PS2 value; Metallic (0.44, 0.275, 1.0, 0.675) is what the capture shows).
+## gradient: which Setup*Gradient the type uses (mcCarPaintJob::GetGradientData).
+const PAINT_TABLE := [
+	{"size": 2.75, "intensity": 1.0, "fresnel": Vector4(0.44, 0.275, 1.0, 0.675), "gradient": "gloss"},       # Gloss
+	{"size": 1.375, "intensity": 1.0, "fresnel": Vector4(0.44, 0.275, 1.0, 0.675), "gradient": "metallic"},   # Metallic
+	{"size": 2.0, "intensity": 1.0, "fresnel": Vector4(0.44, 0.275, 1.0, 0.675), "gradient": "shift"},       # ColorShift
+	{"size": 1.375, "intensity": 1.0, "fresnel": Vector4(0.44, 0.275, 1.0, 0.675), "gradient": "pearl"},     # Pearlescent
+	{"size": 2.0, "intensity": 0.5, "fresnel": Vector4(0.44, 0.0, 0.012, 0.5), "gradient": "metallic"},      # Matte
+	{"size": 2.0, "intensity": 0.2, "fresnel": Vector4(0.44, 0.075, 0.3625, 0.5), "gradient": "gloss"},      # Enamel
+]
 
 const MAX_LIGHTS := 12
 const PAINT_MAP_SHADER := preload("shaders/paint_map.gdshader")
@@ -32,12 +55,20 @@ const ENV_MAP_SHADER := preload("shaders/env_map.gdshader")
 const CAR_SHADER := preload("shaders/car_paint.gdshader")
 const CHROME_SHADER := preload("shaders/chrome.gdshader")
 const GLASS_SHADER := preload("shaders/glass.gdshader")
+const INTERIOR_SHADER := preload("shaders/interior.gdshader")
 const SKY_SHADER := preload("shaders/pano_sky.gdshader")
 const IGNORE_GROUP := &"mc3_paint_ignore"
+const PAINT_GROUP := &"mc3_paint"
+const META_SURFACES := &"_mc3_surfaces"
+## names used in material_shader_map -> kind (-1 = car paint, 0-2 chrome, 3-5 glass)
+const KIND_BY_NAME := {
+	"paint": -1, "chrome": 0, "rim_chrome": 1, "exhaust_chrome": 2,
+	"glass": 3, "headlight_glass": 4, "brakelight_glass": 5, "interior": 6,
+}
 const CHROME_GROUPS := [&"mc3_chrome", &"mc3_rim_chrome", &"mc3_exhaust_chrome"]
 const GLASS_GROUPS := [&"mc3_glass", &"mc3_headlight_glass", &"mc3_brakelight_glass"]
-## chrome groups first (kinds 0-2), then glass groups (kinds 3-5)
-const SPECIAL_GROUPS := [&"mc3_chrome", &"mc3_rim_chrome", &"mc3_exhaust_chrome", &"mc3_glass", &"mc3_headlight_glass", &"mc3_brakelight_glass"]
+## chrome groups first (kinds 0-2), then glass groups (kinds 3-5), then the interior (kind 6)
+const SPECIAL_GROUPS := [&"mc3_chrome", &"mc3_rim_chrome", &"mc3_exhaust_chrome", &"mc3_glass", &"mc3_headlight_glass", &"mc3_brakelight_glass", &"mc3_interior"]
 
 ## Used when the scene has no lights and use_fallback_rig is on (metres, relative to the car).
 const FALLBACK_RIG := [
@@ -56,13 +87,47 @@ const FALLBACK_RIG := [
 @export var camera: Camera3D
 ## Use the bounds of the painted meshes as the car position. Off = this node's position.
 @export var auto_center := true
+## Pick the shader per surface from the material names of the meshes (see the class description).
+## Needs refresh_targets() when changed after the node is in the tree (done automatically).
+@export var assign_by_material_name := false:
+	set(value):
+		assign_by_material_name = value
+		if is_node_ready():
+			refresh_targets()
+## Shader name (the part after " - " in the material name, lower case) -> "paint", "chrome", "rim_chrome",
+## "exhaust_chrome", "glass", "headlight_glass", "brakelight_glass" or "interior". Shaders that are not listed are
+## not touched.
+@export var material_shader_map: Dictionary = {
+	"carpaint": "paint",
+	"chrome": "chrome",
+	"colored_glass": "glass",
+	"black_matte": "interior",
+}
+## In material name mode, take base_color, the chrome colours and the glass tint / opacity from the first
+## matching material (done at every refresh_targets()).
+@export var adopt_material_colors := false:
+	set(value):
+		adopt_material_colors = value
+		if is_node_ready():
+			refresh_targets()
 
 # ---------------------------------------------------------------------------------------
 @export_group("Paint")
 @export_color_no_alpha var base_color := Color(1.0, 0.45, 0.10)
-@export var paint_type: PaintType = PaintType.METALLIC
-## Second colour of the Pearl paint type (gradient stop 0).
+@export var paint_type: PaintType = PaintType.METALLIC:
+	set(value):
+		paint_type = value
+		if apply_paint_type_defaults:
+			_apply_type_defaults()
+## When the paint type changes, load the game's values for that finish (highlight size / intensity and the Fresnel
+## numbers, see PAINT_TABLE) into the properties below. Turn it off to keep your own values.
+@export var apply_paint_type_defaults := true
+## Second colour of the Pearlescent paint type (gradient stop 0).
 @export_color_no_alpha var pearl_color := Color(0.45, 0.85, 1.0)
+## ColorShift: the gradient runs centre -> edge through these colours and ends at base_color. Not in the capture,
+## so the defaults are guesses.
+@export_color_no_alpha var color_shift_color_0 := Color(0.15, 0.35, 1.0)
+@export_color_no_alpha var color_shift_color_1 := Color(0.85, 0.15, 0.85)
 ## Picker colour -> gradient stop 1. The game stores dark colours (capture: ~0.25 of the visible colour).
 @export_range(0.05, 1.0, 0.01) var body_color_scale := 0.25
 ## SetupMetallicGradient scale; stop 0 = clamp(normalize(stop 1) * scale). The capture matches 1.5.
@@ -71,9 +136,11 @@ const FALLBACK_RIG := [
 
 # ---------------------------------------------------------------------------------------
 @export_group("Highlights")
-## Sprite half-size is size * 0.3 in the game's -1..1 ortho space (capture: about 1.2).
-@export_range(0.3, 3.0, 0.01) var highlight_size := 1.2
-@export_range(0.0, 1.5, 0.01) var highlight_intensity := 0.8
+## Sprite half-size is size * 0.3 in the game's -1..1 ortho space. Per finish: Gloss 2.75, Metallic 1.375,
+## ColorShift 2.0, Pearlescent 1.375, Matte 2.0, Enamel 2.0 (loaded when the paint type changes).
+@export_range(0.3, 3.0, 0.01) var highlight_size := 1.375
+## Per finish: 1.0, 1.0, 1.0, 1.0, Matte 0.5, Enamel 0.2.
+@export_range(0.0, 1.5, 0.01) var highlight_intensity := 1.0
 ## DrawHilight fades a light out linearly over 25 m.
 @export_range(5.0, 60.0, 0.5) var light_fade_distance := 25.0
 ## The game only draws the 10 closest lights.
@@ -195,6 +262,11 @@ const FALLBACK_RIG := [
 @export_range(0.5, 2.0, 0.01) var glass_lookup_k := 1.0
 
 # ---------------------------------------------------------------------------------------
+@export_group("Interior")
+## Flat, unshaded and pitch black in the game.
+@export_color_no_alpha var interior_color := Color(0.0, 0.0, 0.0)
+
+# ---------------------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------------------
 var _paint_vp: SubViewport
@@ -204,6 +276,10 @@ var _env_mat: ShaderMaterial
 var _car_mat: ShaderMaterial
 var _chrome_mats: Array = []
 var _glass_mats: Array = []
+var _interior_mat: ShaderMaterial
+var _palette_img: Image
+var _palette_tex: ImageTexture
+var _palette_key: Array = []
 var _sky_mat: ShaderMaterial
 var _sky: Sky
 var _paint_img: Image
@@ -211,7 +287,9 @@ var _paint_tex: ImageTexture
 var _dot_img: Image
 var _dot_tex: ImageTexture
 var _meshes: Array = []
-var _chrome_meshes: Array = [[], [], [], [], [], []]   # kinds 0-2 chrome, 3-5 glass
+var _surface_jobs: Array = []        # [mesh, surface, kind] from material name mode
+var _adopted: Dictionary = {}        # kind -> Color from the source materials
+var _chrome_meshes: Array = [[], [], [], [], [], [], []]   # kinds 0-2 chrome, 3-5 glass, 6 interior
 var _scene_lights: Array = []
 var _lights_dirty := true
 var _bounds := AABB(Vector3.ZERO, Vector3.ONE)
@@ -283,21 +361,26 @@ func get_lookup_scale() -> float:
 ## Re-scan the target for meshes. Call it after adding or removing meshes below the target.
 func refresh_targets() -> void:
 	_meshes.clear()
+	_surface_jobs.clear()
+	_adopted.clear()
 	for i in SPECIAL_GROUPS.size():
 		_chrome_meshes[i].clear()
 	var root: Node = target if target != null else get_parent()
 	if root != null:
-		_collect(root, -1, _meshes, _chrome_meshes)
-	_assign_materials(_meshes, _chrome_meshes)
+		_collect(root, -1, _meshes, _chrome_meshes, _surface_jobs)
+	_assign_materials(_meshes, _chrome_meshes, _surface_jobs)
+	if adopt_material_colors and assign_by_material_name:
+		_apply_adopted_colors()
 	_update_bounds()
 
 
 ## Paint another node (and its MeshInstance3D descendants) with the same materials.
 func apply_to(root: Node) -> void:
 	var paint: Array = []
-	var chrome: Array = [[], [], [], [], [], []]
-	_collect(root, -1, paint, chrome)
-	_assign_materials(paint, chrome)
+	var chrome: Array = [[], [], [], [], [], [], []]
+	var jobs: Array = []
+	_collect(root, -1, paint, chrome, jobs)
+	_assign_materials(paint, chrome, jobs)
 
 
 ## Re-scan the scene for OmniLight3D / SpotLight3D nodes. Happens automatically when lights are added or removed.
@@ -340,6 +423,9 @@ func _build_maps() -> void:
 	_paint_img = Image.create(MAX_LIGHTS, 1, false, Image.FORMAT_RGBAF)
 	_paint_tex = ImageTexture.create_from_image(_paint_img)
 	_paint_mat.set_shader_parameter("light_data", _paint_tex)
+	_palette_img = Image.create(256, 1, false, Image.FORMAT_RGBF)
+	_palette_tex = ImageTexture.create_from_image(_palette_img)
+	_paint_mat.set_shader_parameter("palette", _palette_tex)
 	_dot_img = Image.create(MAX_LIGHTS, 1, false, Image.FORMAT_RGBAF)
 	_dot_tex = ImageTexture.create_from_image(_dot_img)
 	_env_mat.set_shader_parameter("dot_data", _dot_tex)
@@ -361,6 +447,8 @@ func _build_maps() -> void:
 		gm.shader = GLASS_SHADER
 		gm.set_shader_parameter("env_map", _env_vp.get_texture())
 		_glass_mats.append(gm)
+	_interior_mat = ShaderMaterial.new()
+	_interior_mat.shader = INTERIOR_SHADER
 	_apply_panorama()
 
 
@@ -410,30 +498,143 @@ func _prepare_panorama(tex: Texture2D) -> Texture2D:
 	return ImageTexture.create_from_image(img)
 
 
-func _collect(n: Node, inherited: int, paint_out: Array, chrome_out: Array) -> void:
+## inherited / kind: -1 = nothing, -2 = forced car paint (group mc3_paint), 0-5 = chrome / glass group.
+func _collect(n: Node, inherited: int, paint_out: Array, chrome_out: Array, jobs_out: Array) -> void:
 	if n.is_in_group(IGNORE_GROUP):
 		return
 	var kind := inherited
+	if n.is_in_group(PAINT_GROUP):
+		kind = -2
 	for i in SPECIAL_GROUPS.size():
 		if n.is_in_group(SPECIAL_GROUPS[i]):
 			kind = i
 	if n is MeshInstance3D:
 		if kind >= 0:
 			chrome_out[kind].append(n)
-		else:
+		elif kind == -2 or not assign_by_material_name:
 			paint_out.append(n)
+		else:
+			_classify_surfaces(n, paint_out, chrome_out, jobs_out)
 	for c in n.get_children():
-		_collect(c, kind, paint_out, chrome_out)
+		_collect(c, kind, paint_out, chrome_out, jobs_out)
 
 
-func _assign_materials(paint: Array, chrome: Array) -> void:
+## "05 - carpaint" -> "carpaint", "2E - chrome.001" -> "chrome"
+func _shader_name_of(material_name: String) -> String:
+	var s := material_name.strip_edges().to_lower()
+	var idx := s.rfind(" - ")
+	if idx >= 0:
+		s = s.substr(idx + 3)
+	var dot := s.rfind(".")
+	if dot > 0 and s.substr(dot + 1).is_valid_int():
+		s = s.substr(0, dot)
+	return s.strip_edges()
+
+
+func _kind_of_shader(shader_name: String) -> int:
+	if not material_shader_map.has(shader_name):
+		return -3                                   # not implemented: leave the surface alone
+	return int(KIND_BY_NAME.get(str(material_shader_map[shader_name]), -3))
+
+
+## Per surface: [shader name, source colour]. Read once from the source materials and cached on the mesh,
+## because the source materials are replaced by our overrides afterwards.
+func _surface_infos(mi: MeshInstance3D) -> Array:
+	if mi.has_meta(META_SURFACES):
+		return mi.get_meta(META_SURFACES)
+	var infos: Array = []
+	if mi.mesh != null:
+		for i in mi.mesh.get_surface_count():
+			var mat: Material = mi.get_surface_override_material(i)
+			if mat == null:
+				mat = mi.mesh.surface_get_material(i)
+			var info_name := ""
+			var info_color := Color.WHITE
+			if mat != null:
+				info_name = _shader_name_of(mat.resource_name)
+				if mat is BaseMaterial3D:
+					info_color = (mat as BaseMaterial3D).albedo_color
+			infos.append([info_name, info_color])
+	mi.set_meta(META_SURFACES, infos)
+	return infos
+
+
+func _classify_surfaces(mi: MeshInstance3D, paint_out: Array, chrome_out: Array, jobs_out: Array) -> void:
+	var infos := _surface_infos(mi)
+	var in_paint := false
+	var in_kind := {}
+	for i in infos.size():
+		var kind := _kind_of_shader(infos[i][0])
+		if kind == -3:
+			continue
+		jobs_out.append([mi, i, kind])
+		if not _adopted.has(kind):
+			_adopted[kind] = infos[i][1]
+		if kind == -1:
+			in_paint = true
+		else:
+			in_kind[kind] = true
+	if in_paint:
+		paint_out.append(mi)                        # counts for the bounds
+	for kind in in_kind:
+		chrome_out[kind].append(mi)
+
+
+func _apply_adopted_colors() -> void:
+	for kind in _adopted:
+		var c: Color = _adopted[kind]
+		var rgb := Color(c.r, c.g, c.b)
+		match kind:
+			-1: base_color = rgb
+			0: chrome_color = rgb
+			1: rim_chrome_color = rgb
+			2: exhaust_chrome_color = rgb
+			3:
+				glass_tint = rgb
+				glass_opacity = c.a
+			4:
+				headlight_glass_tint = rgb
+				headlight_glass_opacity = c.a
+			5:
+				brakelight_glass_tint = rgb
+				brakelight_glass_opacity = c.a
+			6: interior_color = rgb
+
+
+func _material_for_kind(kind: int) -> Material:
+	if kind == -1:
+		return _car_mat
+	if kind < 3:
+		return _chrome_mats[kind]
+	if kind == 6:
+		return _interior_mat
+	return _glass_mats[kind - 3]
+
+
+func _assign_materials(paint: Array, chrome: Array, jobs: Array) -> void:
+	# meshes that only get some of their surfaces replaced must not keep a whole-mesh override
+	for job in jobs:
+		var jm: MeshInstance3D = job[0]
+		jm.material_override = null
+	var surface_meshes := {}
+	for job in jobs:
+		surface_meshes[job[0]] = true
 	for mi in paint:
-		mi.material_override = _car_mat
+		if not surface_meshes.has(mi):
+			mi.material_override = _car_mat
 	for i in 3:
 		for mi in chrome[i]:
-			mi.material_override = _chrome_mats[i]
+			if not surface_meshes.has(mi):
+				mi.material_override = _chrome_mats[i]
 		for mi in chrome[i + 3]:
-			mi.material_override = _glass_mats[i]
+			if not surface_meshes.has(mi):
+				mi.material_override = _glass_mats[i]
+	for mi in chrome[6]:
+		if not surface_meshes.has(mi):
+			mi.material_override = _interior_mat
+	for job in jobs:
+		var sm: MeshInstance3D = job[0]
+		sm.set_surface_override_material(job[1], _material_for_kind(job[2]))
 
 
 func _get_camera() -> Camera3D:
@@ -598,18 +799,66 @@ func _update_lights(cam: Camera3D) -> void:
 # ---------------------------------------------------------------------------------------
 # uniforms
 # ---------------------------------------------------------------------------------------
-func _gradient_colors() -> Array:
-	# SetupMetallicGradient / SetupPearlGradient / SetupGlossGradient
+## mcCarPaintJob::GetGradientData: the stops of the paint type's gradient as [position 0..255, colour].
+## Stop 1 (last) is always the base colour; stop 0 depends on the type (Setup*Gradient).
+func _gradient_stops() -> Array:
 	var b := Vector3(base_color.r, base_color.g, base_color.b) * body_color_scale
-	var a := Vector3.ZERO
-	match paint_type:
-		PaintType.METALLIC:
-			a = (b.normalized() * metallic_scale).clamp(Vector3.ZERO, Vector3.ONE)
-		PaintType.PEARL:
-			a = Vector3(pearl_color.r, pearl_color.g, pearl_color.b)
-		PaintType.GLOSS:
-			a = b * 0.85
-	return [Color(a.x, a.y, a.z, 1.0), Color(b.x, b.y, b.z, 1.0)]
+	var p0 := int(round(gradient_start * 255.0))
+	var kind: String = PAINT_TABLE[clampi(paint_type, 0, PAINT_TABLE.size() - 1)]["gradient"]
+	match kind:
+		"metallic":
+			# SetupMetallicGradient: normalize(base) * scale, clamped to 1 (Matte uses the same gradient)
+			return [[p0, (b.normalized() * metallic_scale).clamp(Vector3.ZERO, Vector3.ONE)], [255, b]]
+		"pearl":
+			return [[p0, _v3(pearl_color)], [255, b]]
+		"shift":
+			var c0 := _v3(color_shift_color_0) * body_color_scale
+			var c1 := _v3(color_shift_color_1) * body_color_scale
+			var mid := p0 + int(round((255 - p0) * 0.5))
+			return [[p0, c0], [mid, c1], [255, b]]
+	# "gloss" (Gloss and Enamel): SetupGlossGradient, 0.85 * base
+	return [[p0, b * 0.85], [255, b]]
+
+
+## mcCarPaintJob::MakeGradient: 256 entries, colour = lerp between the stops around t = i / 255.
+func _palette_color(stops: Array, i: int) -> Vector3:
+	var t := float(i) / 255.0
+	if i < int(stops[0][0]):
+		return stops[0][1]
+	for k in stops.size() - 1:
+		var p0: float = stops[k][0]
+		var p1: float = stops[k + 1][0]
+		if float(i) >= p0 and float(i) <= p1:
+			var u := clampf((t - p0 / 256.0) / maxf((p1 - p0) / 256.0, 0.0001), 0.0, 1.0)
+			return (stops[k][1] as Vector3).lerp(stops[k + 1][1], u)
+	return stops[stops.size() - 1][1]
+
+
+func _update_palette() -> void:
+	var key := [paint_type, base_color, pearl_color, color_shift_color_0, color_shift_color_1,
+			body_color_scale, metallic_scale, gradient_start]
+	if key == _palette_key:
+		return
+	_palette_key = key
+	var stops := _gradient_stops()
+	for i in 256:
+		var c := _palette_color(stops, i)
+		_palette_img.set_pixel(i, 0, Color(c.x, c.y, c.z))
+	_palette_tex.update(_palette_img)
+	var last: Vector3 = stops[stops.size() - 1][1]
+	_paint_mat.set_shader_parameter("color_b", Color(last.x, last.y, last.z, 1.0))
+
+
+## Load the game's per-finish values (PAINT_TABLE) into the exported properties.
+func _apply_type_defaults() -> void:
+	var rec: Dictionary = PAINT_TABLE[clampi(paint_type, 0, PAINT_TABLE.size() - 1)]
+	highlight_size = rec["size"]
+	highlight_intensity = rec["intensity"]
+	var f: Vector4 = rec["fresnel"]
+	fresnel_position = f.x
+	fresnel_min = f.y
+	fresnel_max = f.z
+	fresnel_scale = f.w
 
 
 func _v3(c: Color) -> Vector3:
@@ -620,10 +869,7 @@ func _update_uniforms(cam: Camera3D) -> void:
 	var fov := _vertical_fov(cam)
 	_lookup_scale_now = _scale_for_fov(lookup_scale_k, fov) if auto_lookup_scale else lookup_scale
 
-	var g := _gradient_colors()
-	_paint_mat.set_shader_parameter("color_a", g[0])
-	_paint_mat.set_shader_parameter("color_b", g[1])
-	_paint_mat.set_shader_parameter("gradient_start", gradient_start)
+	_update_palette()
 
 	# DrawSky: u offset = atan2(...) / 2pi of the camera heading
 	var fwd := -cam.global_transform.basis.z
@@ -708,3 +954,5 @@ func _update_uniforms(cam: Camera3D) -> void:
 		gm.set_shader_parameter("fres_scale", glass_fresnel_scale)
 		gm.set_shader_parameter("reflect_gain", reflection_gain)
 		gm.set_shader_parameter("gamma_correct", gamma_correct)
+
+	_interior_mat.set_shader_parameter("interior_color", _v3(interior_color))

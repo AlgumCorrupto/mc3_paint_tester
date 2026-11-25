@@ -36,6 +36,7 @@ const PRESETS := {
 ## Container holding all controls; add your own controls here.
 var content: VBoxContainer
 
+var _scroll: ScrollContainer
 var _base_picker: ColorPickerButton
 var _pano_dialog: FileDialog
 
@@ -57,6 +58,7 @@ func _build() -> void:
 	custom_minimum_size = Vector2(330, 0)
 
 	var scroll := ScrollContainer.new()
+	_scroll = scroll
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	add_child(scroll)
 	content = VBoxContainer.new()
@@ -64,6 +66,11 @@ func _build() -> void:
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content.add_theme_constant_override("separation", 4)
 	scroll.add_child(content)
+
+	# ---- target ----------------------------------------------------------------------
+	_header("Target")
+	_check("Pick shaders per surface from material names", "assign_by_material_name")
+	_check("Take colours from the source materials", "adopt_material_colors")
 
 	# ---- paint colour ----------------------------------------------------------------
 	_header("Paint")
@@ -97,15 +104,23 @@ func _build() -> void:
 	content.add_child(type_row)
 	_label(type_row, "Paint type", 13)
 	var type_opt := OptionButton.new()
-	type_opt.add_item("Metallic", MC3CarPaint.PaintType.METALLIC)
-	type_opt.add_item("Pearl", MC3CarPaint.PaintType.PEARL)
 	type_opt.add_item("Gloss", MC3CarPaint.PaintType.GLOSS)
+	type_opt.add_item("Metallic", MC3CarPaint.PaintType.METALLIC)
+	type_opt.add_item("ColorShift", MC3CarPaint.PaintType.COLORSHIFT)
+	type_opt.add_item("Pearlescent", MC3CarPaint.PaintType.PEARLESCENT)
+	type_opt.add_item("Matte (no reflection)", MC3CarPaint.PaintType.MATTE)
+	type_opt.add_item("Enamel", MC3CarPaint.PaintType.ENAMEL)
 	type_opt.selected = type_opt.get_item_index(paint.paint_type)
 	type_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	type_opt.item_selected.connect(func(i: int) -> void: paint.paint_type = type_opt.get_item_id(i))
+	type_opt.item_selected.connect(func(i: int) -> void:
+		paint.paint_type = type_opt.get_item_id(i)
+		call_deferred("_rebuild_keep_scroll"))   # the finish loads its own values into the sliders
 	type_row.add_child(type_opt)
 
-	_color("Pearl highlight colour (Pearl only)", "pearl_color")
+	_check("Load the game's values when the paint type changes", "apply_paint_type_defaults")
+	_color("Pearlescent second colour", "pearl_color")
+	_color("ColorShift colour 1 (centre)", "color_shift_color_0")
+	_color("ColorShift colour 2", "color_shift_color_1")
 	_slider("Body colour scale (stop 1)", "body_color_scale", 0.05, 1.0, 0.01)
 	_slider("Metallic highlight scale", "metallic_scale", 0.5, 3.0, 0.01)
 	_slider("Gradient start", "gradient_start", 0.0, 0.9, 0.01)
@@ -181,6 +196,10 @@ func _build() -> void:
 	_slider("Glass Fresnel max", "glass_fresnel_max", 0.0, 1.0, 0.005)
 	_slider("Glass Fresnel scale", "glass_fresnel_scale", 0.0, 3.0, 0.005)
 
+	# ---- interior --------------------------------------------------------------------
+	_header("Interior (group mc3_interior, material \"black_matte\")")
+	_color("Interior colour", "interior_color")
+
 	# ---- generated maps --------------------------------------------------------------
 	if show_maps:
 		_header("Generated maps")
@@ -196,6 +215,14 @@ func _build() -> void:
 	_pano_dialog.size = Vector2i(800, 520)
 	_pano_dialog.file_selected.connect(func(path: String) -> void: paint.set_panorama_from_file(path))
 	add_child(_pano_dialog)
+
+
+func _rebuild_keep_scroll() -> void:
+	var keep := _scroll.scroll_vertical if _scroll != null else 0
+	_build()
+	await get_tree().process_frame
+	if _scroll != null:
+		_scroll.scroll_vertical = keep
 
 
 func _panorama_preset_picker() -> void:

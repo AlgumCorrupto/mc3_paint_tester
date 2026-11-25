@@ -21,8 +21,16 @@ the plugin only adds *Project > Tools > MC3 Car Paint: add paint node to selecte
    | `mc3_glass` | alpha blended glass, `glass_tint` / `glass_opacity` |
    | `mc3_headlight_glass` | glass lit by `headlights_on` |
    | `mc3_brakelight_glass` | glass lit by `headlights_on` + `brakelights_on` |
+   | `mc3_interior` | flat, unshaded, pitch black interior |
    | `mc3_paint_ignore` | untouched |
 
+   **Material name mode** (`assign_by_material_name`): for models whose materials are named after the game's shaders
+   (`05 - carpaint`, `2E - chrome`, `17 - colored_glass`, ...) the shader is chosen **per surface** from the part after
+   `" - "`, via `material_shader_map` (`carpaint` -> paint, `chrome` -> chrome, `colored_glass` -> glass, `black_matte` -> interior by default; add
+   `"exhaust_chrome": "exhaust_chrome"` etc. as needed). Surfaces whose shader is not implemented (masked chrome, aa trim,
+   emissive lights, decals, ...) keep their own material. `adopt_material_colors` takes `base_color`, the chrome colours and
+   the glass tint / opacity from the first matching material. Put a mesh in the group `mc3_paint` to force car paint on
+   the whole mesh in this mode, or in any other group above to override the names.
 2. Make sure the scene has a `Camera3D` (the active one is used) and, ideally, some `OmniLight3D` / `SpotLight3D`
    nodes: their positions drive the highlights and the glows in the reflection. With no lights the built-in garage rig is used.
 3. Tweak the properties in the inspector (grouped: Paint, Highlights, Environment, Vertex lighting,
@@ -32,7 +40,7 @@ the plugin only adds *Project > Tools > MC3 Car Paint: add paint node to selecte
 var paint := MC3CarPaint.new()
 car.add_child(paint)
 paint.base_color = Color(0.1, 0.25, 0.9)
-paint.paint_type = MC3CarPaint.PaintType.PEARL
+paint.paint_type = MC3CarPaint.PaintType.PEARLESCENT
 paint.pearl_color = Color(0.6, 0.9, 1.0)
 paint.rim_chrome_color = Color(1.0, 0.85, 0.5)
 $Wheel.add_to_group("mc3_rim_chrome")
@@ -71,13 +79,15 @@ panel.content.add_child(my_extra_control)   # extend it
 | Member | Description |
 |---|---|
 | `target`, `camera`, `auto_center` | what to paint, which camera to use, where the "car" is |
-| `base_color`, `paint_type`, `pearl_color`, `body_color_scale`, `metallic_scale`, `gradient_start` | paint |
+| `assign_by_material_name`, `material_shader_map`, `adopt_material_colors` | per-surface shader choice from material names |
+| `base_color`, `paint_type`, `apply_paint_type_defaults`, `pearl_color`, `color_shift_color_0/1`, `body_color_scale`, `metallic_scale`, `gradient_start` | paint |
 | `highlight_size/intensity`, `light_fade_distance`, `max_lights`, `camera_light`, `light_sources`, `auto_collect_lights`, `use_fallback_rig` | highlights in the paint map |
 | `reflection_alpha`, `panorama`, `panorama_gain`, `panorama_match_sky`, `panorama_flip_v`, `light_dot_gain`, `env_fov` | environment map |
 | `ambient`, `vertex_light_scale`, `lightN_direction/color` | vertex lighting (COLOR0), defaults are the capture's values |
 | `auto_lookup_scale`, `lookup_scale_k`, `normal_weight`, `paint_position_weight`, `fresnel_*` | lookup and Fresnel-like weight (the game's c112, c116.w, c117.z, c146) |
 | `chrome_color`, `rim_chrome_color`, `exhaust_chrome_color`, `chrome_ambient_lift`, `chrome_position_weight` | chrome |
 | `glass_tint`, `glass_opacity`, `headlight_glass_*`, `brakelight_glass_*`, `headlights_on`, `brakelights_on`, `glass_position_weight`, `glass_fresnel_*` | glass |
+| `interior_color` | interior |
 | `get_material()`, `get_chrome_material(kind)`, `get_glass_material(kind)` | the `ShaderMaterial`s (assign them to more meshes) |
 | `apply_to(node)` | paint another subtree (groups are honoured) |
 | `refresh_targets()` / `refresh_lights()` | re-scan after changing the scene |
@@ -95,6 +105,7 @@ panel.content.add_child(my_extra_control)   # extend it
 | car paint vertex program + hand written combiners | `shaders/car_paint.gdshader` |
 | `drwShaderChrome` family, fixed function combiner | `shaders/chrome.gdshader` |
 | `drwShaderColoredGlass` (+ headlight / brakelight), hand written combiner, alpha blend | `shaders/glass.gdshader` |
+| interior ("black_matte"): flat unshaded black | `shaders/interior.gdshader` |
 | `SetupMetallic/Pearl/GlossGradient`, `MakeGradient`, `SetupImage` | `MC3CarPaint._gradient_colors()` + the sprite maths in the paint map shader |
 
 ### Lookup (paint map, env map and chrome)
@@ -124,6 +135,30 @@ ambient'   = ambient + (1 - ambient) * 0.2                 (chrome_color_a)
 COLOR0.rgb = clamp((ambient' + sum max(N.-L_i, 0) * lightColor_i) * chrome_color)
 out        = clamp(COLOR0.rgb * envMap(uv).rgb * 2)
 ```
+
+### Paint finishes
+`PaintType` uses the game's ids (garage names Gloss, Metallic, ColorShift, Pearlescent, Matte, Enamel). Each finish has
+a record in `mcCarPaintJob::sm_paintTypeInfo` (read from the constructor) and a gradient from
+`mcCarPaintJob::GetGradientData`; choosing a type loads its values into the properties
+(`apply_paint_type_defaults`):
+
+| Finish | Gradient (stop 0, stop 1 = base colour) | Sprite size | Intensity | Fresnel (position, min, max, scale) |
+|---|---|---|---|---|
+| Gloss | `0.85 * base` | 2.75 | 1.0 | 0.44, 0.275, 1.0, 0.675 |
+| Metallic | `clamp(normalize(base) * 1.5)` | 1.375 | 1.0 | 0.44, 0.275, 1.0, 0.675 |
+| ColorShift | several stops from the paint job file | 2.0 | 1.0 | 0.44, 0.275, 1.0, 0.675 |
+| Pearlescent | second colour | 1.375 | 1.0 | 0.44, 0.275, 1.0, 0.675 |
+| **Matte** | as Metallic | 2.0 | 0.5 | 0.44, **0, 0.012**, 0.5 |
+| Enamel | `0.85 * base` | 2.0 | 0.2 | 0.44, 0.075, 0.3625, 0.5 |
+
+**Matte** is the car paint without the env reflection: its Fresnel maximum is 0.012 (0.024 in PS2 units), so the
+envmap contributes about 1%. The Xbox build stores Fresnel min / max / scale at half the PS2 value; Metallic matches the
+capture exactly (this also corrects the earlier guessed sprite size 1.2 / intensity 0.8 to 1.375 / 1.0).
+The ColorShift stops and the Matte / Enamel / Gloss / Pearlescent gradients are read from the code, not from a capture.
+
+### Interior
+`shaders/interior.gdshader`: a flat, unshaded, pitch black material, double sided. In converted models it is the
+`black_matte` material (the cabin mesh uses only that one).
 
 ### Glass combiner
 ```
@@ -167,5 +202,8 @@ metallic highlight scale 1.5, highlight alpha about 0.6, sprite FWHM about 46 px
   not from a pixel comparison.
 * Glass tint and opacity of the headlight and brakelight variants (the capture only has plain smoked glass), and the
   game's gamma-space blending (Godot blends in linear space after the sRGB conversion).
-* Per-paint-type highlight size/intensity, the real light positions, fog, and how model scale enters the lookup
+* The ColorShift colours (the game reads them from the paint job file), and anything about the finishes that is only
+  in the code and was not in a capture (Matte, Enamel, Gloss, Pearlescent, ColorShift).
+* `aa_trim` (trim painted with the paint map and a trim colour, no env map) is understood from the code but not implemented.
+* Per-paint-type highlight size/intensity (now taken from the game's table), the real light positions, fog, and how model scale enters the lookup
   (the game does not renormalise the transformed normal; `keep_model_scale` reproduces that).

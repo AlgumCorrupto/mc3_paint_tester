@@ -5,7 +5,8 @@ extends Node3D
 ##
 ## Drag = orbit, wheel = zoom.
 
-const MODEL_PATH := "res://demo/model/scene.gltf"
+const CAR_PATH := "res://demo/model/350z.glb"             # reference car, materials named after the MC3 shaders
+const TESTER_PATH := "res://demo/model/scene.gltf"        # single material test shape
 const PANORAMA_PATH := "res://demo/textures/garage_panorama.jpg"
 
 ## Garage lights relative to the car (OmniLight3D nodes: the addon uses their positions).
@@ -18,7 +19,8 @@ const LIGHT_RIG := [
 ]
 
 var car: Node3D
-var model: Node3D
+var model: Node3D       # 350Z
+var tester: Node3D      # paint tester
 var sphere: MeshInstance3D
 var paint: MC3CarPaint
 var rig: Node3D
@@ -49,17 +51,24 @@ func _ready() -> void:
 	cam.fov = 45.0
 	add_child(cam)
 
-	# --- the car: the sample model plus a sphere to read the mapping ----------------------
+	# --- the car: the 350Z reference model, a single material test shape and a sphere -------
 	car = Node3D.new()
 	car.name = "Car"
 	add_child(car)
 
-	var packed := load(MODEL_PATH) as PackedScene
+	var packed := load(CAR_PATH) as PackedScene
 	if packed != null:
 		model = packed.instantiate()
 		car.add_child(model)
 	else:
-		push_warning("Could not load %s (open the project in the editor once so it gets imported)." % MODEL_PATH)
+		push_warning("Could not load %s (open the project in the editor once so it gets imported)." % CAR_PATH)
+
+	var tester_scene := load(TESTER_PATH) as PackedScene
+	if tester_scene != null:
+		tester = tester_scene.instantiate()
+		tester.visible = false
+		tester.add_to_group("mc3_paint")      # single material shapes: paint the whole mesh
+		car.add_child(tester)
 
 	sphere = MeshInstance3D.new()
 	var sm := SphereMesh.new()
@@ -68,11 +77,12 @@ func _ready() -> void:
 	sm.radial_segments = 96
 	sm.rings = 48
 	sphere.mesh = sm
-	sphere.visible = (model == null)
+	sphere.visible = (model == null and tester == null)
+	sphere.add_to_group("mc3_paint")
 	car.add_child(sphere)
 
-	_add_chrome_ornaments()
-	_add_glass_ornaments()
+	#_add_chrome_ornaments()
+	#_add_glass_ornaments()
 
 	# --- lights: plain OmniLight3D nodes, found automatically by the addon -----------------
 	rig = Node3D.new()
@@ -87,6 +97,11 @@ func _ready() -> void:
 	# --- the addon node: add it LAST so it finds all meshes below the car -----------------
 	paint = MC3CarPaint.new()
 	paint.name = "MC3CarPaint"
+	# the 350Z materials are named after the game's shaders ("05 - carpaint", "2E - chrome",
+	# "17 - colored_glass", ...): pick the shader per surface and take the colours from the materials.
+	# Shaders that are not implemented (masked chrome, aa trim, emissive lights, ...) keep their own material.
+	paint.assign_by_material_name = true
+	paint.adopt_material_colors = true
 	car.add_child(paint)
 
 	# the panorama is the car's reflection AND the scene background; match_sky keeps them consistent
@@ -109,11 +124,7 @@ func _frame_object() -> void:
 ## Three chrome test pieces in a row next to the car: a rim, a ball and an exhaust tube.
 ## They only need to be in a chrome group; the MC3CarPaint node finds them through the car node.
 func _add_chrome_ornaments() -> void:
-	var box := AABB(Vector3(-2.5, -1.5, -1.3), Vector3(5.0, 1.4, 2.6))
-	if model != null:
-		var mi := _find_mesh(model)
-		if mi != null:
-			box = mi.global_transform * mi.get_aabb()
+	var box := _reference_box()
 	var c := box.get_center()
 	var z := box.position.z + box.size.z + 1.4
 	var y := box.position.y + 0.5
@@ -155,11 +166,7 @@ func _add_chrome_ornaments() -> void:
 ## Three glass test pieces above the chrome row: plain smoked glass, a headlight lens and a brakelight lens.
 ## Use the "Headlights on" / "Brakelights on" sliders of the panel to light the lenses up.
 func _add_glass_ornaments() -> void:
-	var box := AABB(Vector3(-2.5, -1.5, -1.3), Vector3(5.0, 1.4, 2.6))
-	if model != null:
-		var mi := _find_mesh(model)
-		if mi != null:
-			box = mi.global_transform * mi.get_aabb()
+	var box := _reference_box()
 	var c := box.get_center()
 	var z := box.position.z + box.size.z + 1.4
 	var y := box.position.y + 2.0
@@ -197,14 +204,26 @@ func _add_glass_ornaments() -> void:
 	car.add_child(brake)
 
 
-func _find_mesh(n: Node) -> MeshInstance3D:
+## Bounds of the reference car (all of its meshes), used to place the test pieces.
+func _reference_box() -> AABB:
+	var root: Node3D = model if model != null else tester
+	var boxes: Array = []
+	if root != null:
+		_collect_mesh_boxes(root, boxes)
+	if boxes.is_empty():
+		return AABB(Vector3(-2.5, -1.5, -1.3), Vector3(5.0, 1.4, 2.6))
+	var box: AABB = boxes[0]
+	for b in boxes:
+		box = box.merge(b)
+	return box
+
+
+func _collect_mesh_boxes(n: Node, out: Array) -> void:
 	if n is MeshInstance3D:
-		return n
+		var mi := n as MeshInstance3D
+		out.append(mi.global_transform * mi.get_aabb())
 	for c in n.get_children():
-		var r := _find_mesh(c)
-		if r != null:
-			return r
-	return null
+		_collect_mesh_boxes(c, out)
 
 
 func _process(delta: float) -> void:
@@ -261,15 +280,21 @@ func _build_ui() -> void:
 	var row := HBoxContainer.new()
 	c.add_child(row)
 	var model_btn := Button.new()
-	model_btn.text = "Model"
+	model_btn.text = "350Z"
 	model_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	model_btn.disabled = (model == null)
-	model_btn.pressed.connect(func() -> void: _show(true))
+	model_btn.pressed.connect(func() -> void: _show(0))
 	row.add_child(model_btn)
+	var tester_btn := Button.new()
+	tester_btn.text = "Tester"
+	tester_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tester_btn.disabled = (tester == null)
+	tester_btn.pressed.connect(func() -> void: _show(1))
+	row.add_child(tester_btn)
 	var sphere_btn := Button.new()
 	sphere_btn.text = "Sphere"
 	sphere_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	sphere_btn.pressed.connect(func() -> void: _show(false))
+	sphere_btn.pressed.connect(func() -> void: _show(2))
 	row.add_child(sphere_btn)
 
 	var bg := CheckBox.new()
@@ -284,13 +309,15 @@ func _build_ui() -> void:
 	c.add_child(rot)
 
 	var credit := Label.new()
-	credit.text = "Model: \"Paint tester\" by tifaiter (CC-BY-4.0)"
+	credit.text = "Paint tester: \"Paint tester\" by tifaiter (CC-BY-4.0)"
 	credit.add_theme_font_size_override("font_size", 11)
 	c.add_child(credit)
 
 
-func _show(show_model: bool) -> void:
+func _show(which: int) -> void:
 	if model != null:
-		model.visible = show_model
-	sphere.visible = not show_model
+		model.visible = (which == 0)
+	if tester != null:
+		tester.visible = (which == 1)
+	sphere.visible = (which == 2)
 	_frame_object()
