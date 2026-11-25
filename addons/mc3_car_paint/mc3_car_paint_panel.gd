@@ -166,6 +166,21 @@ func _build() -> void:
 	_slider("Chrome ambient lift", "chrome_ambient_lift", 0.0, 1.0, 0.01)
 	_slider("Chrome position weight", "chrome_position_weight", 0.0, 2.0, 0.005)
 
+	# ---- glass -----------------------------------------------------------------------
+	_header("Glass (groups mc3_glass / mc3_headlight_glass / mc3_brakelight_glass)")
+	_color("Glass tint", "glass_tint")
+	_slider("Glass opacity", "glass_opacity", 0.0, 1.0, 0.005)
+	_color("Headlight glass tint", "headlight_glass_tint")
+	_slider("Headlight glass opacity", "headlight_glass_opacity", 0.0, 1.0, 0.005)
+	_color("Brakelight glass tint", "brakelight_glass_tint")
+	_slider("Brakelight glass opacity", "brakelight_glass_opacity", 0.0, 1.0, 0.005)
+	_slider("Headlights on", "headlights_on", 0.0, 1.0, 0.01)
+	_slider("Brakelights on", "brakelights_on", 0.0, 1.0, 0.01)
+	_slider("Glass reflection position weight", "glass_position_weight", 0.0, 2.0, 0.005)
+	_slider("Glass Fresnel min", "glass_fresnel_min", 0.0, 1.0, 0.005)
+	_slider("Glass Fresnel max", "glass_fresnel_max", 0.0, 1.0, 0.005)
+	_slider("Glass Fresnel scale", "glass_fresnel_scale", 0.0, 3.0, 0.005)
+
 	# ---- generated maps --------------------------------------------------------------
 	if show_maps:
 		_header("Generated maps")

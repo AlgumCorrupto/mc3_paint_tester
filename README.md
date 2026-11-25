@@ -1,9 +1,9 @@
 # MC3 Car Paint addon + demo project
 
 * `addons/mc3_car_paint/` - the addon (see its README). Classes: `MC3CarPaint`, `MC3CarPaintPanel`.
-  Car paint and chrome materials, verified against an Xbox capture.
+  Car paint, chrome and glass materials, rebuilt from an Xbox capture.
 * `demo/` - demo scene using only the public API: the sample car, a sphere, and three chrome test pieces
-  (rim, ball, exhaust tube) in the chrome groups.
+  (rim, ball, exhaust tube) in the chrome groups and three glass test pieces (smoked, headlight, brakelight).
 
 Open the folder in Godot 4.3+ (4.2 should work), let it import the glTF, press F5.
 Drag = orbit, wheel = zoom.

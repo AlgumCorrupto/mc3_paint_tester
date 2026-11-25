@@ -1,6 +1,6 @@
 # MC3 Car Paint (Godot 4.3+ addon)
 
-Midnight Club 3 style **car paint** and **chrome** as a drop-in node, rebuilt from a RenderDoc capture (Xbox build,
+Midnight Club 3 style **car paint**, **chrome** and **glass** as a drop-in node, rebuilt from a RenderDoc capture (Xbox build,
 Vulkan) and the game's disassembly (`mcCarPaintJob`, `mcCarMetallicPaint`, `mcCityEnvMap`, `drwShader*Chrome`).
 The shading maths was checked against the capture pixel by pixel (see "Verified").
 
@@ -18,6 +18,9 @@ the plugin only adds *Project > Tools > MC3 Car Paint: add paint node to selecte
    | `mc3_chrome` | chrome, tinted by `chrome_color` |
    | `mc3_rim_chrome` | chrome, tinted by `rim_chrome_color` |
    | `mc3_exhaust_chrome` | chrome, tinted by `exhaust_chrome_color` |
+   | `mc3_glass` | alpha blended glass, `glass_tint` / `glass_opacity` |
+   | `mc3_headlight_glass` | glass lit by `headlights_on` |
+   | `mc3_brakelight_glass` | glass lit by `headlights_on` + `brakelights_on` |
    | `mc3_paint_ignore` | untouched |
 
 2. Make sure the scene has a `Camera3D` (the active one is used) and, ideally, some `OmniLight3D` / `SpotLight3D`
@@ -74,7 +77,8 @@ panel.content.add_child(my_extra_control)   # extend it
 | `ambient`, `vertex_light_scale`, `lightN_direction/color` | vertex lighting (COLOR0), defaults are the capture's values |
 | `auto_lookup_scale`, `lookup_scale_k`, `normal_weight`, `paint_position_weight`, `fresnel_*` | lookup and Fresnel-like weight (the game's c112, c116.w, c117.z, c146) |
 | `chrome_color`, `rim_chrome_color`, `exhaust_chrome_color`, `chrome_ambient_lift`, `chrome_position_weight` | chrome |
-| `get_material()`, `get_chrome_material(kind)` | the `ShaderMaterial`s (assign them to more meshes) |
+| `glass_tint`, `glass_opacity`, `headlight_glass_*`, `brakelight_glass_*`, `headlights_on`, `brakelights_on`, `glass_position_weight`, `glass_fresnel_*` | glass |
+| `get_material()`, `get_chrome_material(kind)`, `get_glass_material(kind)` | the `ShaderMaterial`s (assign them to more meshes) |
 | `apply_to(node)` | paint another subtree (groups are honoured) |
 | `refresh_targets()` / `refresh_lights()` | re-scan after changing the scene |
 | `get_paint_texture()` / `get_env_texture()` / `get_lookup_scale()` | generated 256x256 maps, current lookup scale |
@@ -90,6 +94,7 @@ panel.content.add_child(my_extra_control)   # extend it
 | `mcCityEnvMap::DrawSky` + light glows (256x256 env map) | `shaders/env_map.gdshader` in a `SubViewport` |
 | car paint vertex program + hand written combiners | `shaders/car_paint.gdshader` |
 | `drwShaderChrome` family, fixed function combiner | `shaders/chrome.gdshader` |
+| `drwShaderColoredGlass` (+ headlight / brakelight), hand written combiner, alpha blend | `shaders/glass.gdshader` |
 | `SetupMetallic/Pearl/GlossGradient`, `MakeGradient`, `SetupImage` | `MC3CarPaint._gradient_colors()` + the sprite maths in the paint map shader |
 
 ### Lookup (paint map, env map and chrome)
@@ -120,6 +125,20 @@ COLOR0.rgb = clamp((ambient' + sum max(N.-L_i, 0) * lightColor_i) * chrome_color
 out        = clamp(COLOR0.rgb * envMap(uv).rgb * 2)
 ```
 
+### Glass combiner
+```
+ambient'   = ambient + (1 - ambient) * light_lift            light_lift = 0 | 0.5*headlight | 0.5*headlight + 0.5*brakelight
+COLOR0.rgb = clamp((ambient' + sum max(N.-L_i, 0) * lightColor_i) * material)
+COLOR0.a   = clamp((1 - n.z) * 1.5, 0.124, 1.0)              glassFresnelParams = (0.9, 0.124, 1.0, 1.5)
+lit        = clamp(tint * COLOR0.rgb * 2)
+ea         = clamp(envMap.a * COLOR0.a * 2)
+out.rgb    = envMap.rgb * ea + lit * (1 - ea)                 env lookup with a = 0.9 * 0.25
+out.alpha  = opacity                                         blend SrcAlpha / InvSrcAlpha, RGB write only
+```
+Capture values: tint (22, 22, 22)/255, opacity 115/255 (the `.shadert` arguments of the coloured glass).
+Face-on the reflection weight is at its minimum (about 0.09 after the x2), at grazing angles it reaches 0.7+,
+so the glass is dark and see-through in the middle and mirror-like at the edges.
+
 ### Paint map and env map
 Per light the paint map gets a glow sprite where the normal equal to the half vector between "to light" and
 "to camera" is looked up (same mapping as the car shader). The sprite is a radial gradient
@@ -132,6 +151,7 @@ projected light glows, seen from the car looking back at the viewer.
 |---|---|---|
 | EID 4054 (car body) | full car paint, rebuilt from the dumped vertices, constants and textures | correlation 1.000, mean error 0.001 (0-1 scale), p95 0.002, 13846 pixels |
 | EID 3912 (wheel spokes) | chrome | mean error 0.005, p95 0.002 |
+| EID 4410 (coloured glass) | glass: pixel shader and constants read exactly, vertex program identical to the car paint's; the alpha blend was only checked indirectly (regression of the final colour on the predicted glass colour: slope 0.42 vs opacity 0.451) | needs the frame before the draw for a pixel exact check |
 
 Constants from the capture used as defaults: ambient 0.065, light 0 = 0.34036 along (0.638, -0.505, -0.581),
 light 1 = 0.25 along (0, -0.958, -0.287), `c112` scale 0.64248 (= FOV 43 degrees), `c116.w` 0.25, `c117.z` 0.05,
@@ -145,5 +165,7 @@ metallic highlight scale 1.5, highlight alpha about 0.6, sprite FWHM about 46 px
   the game's formula is available as `game_placement_formula`.
 * The orientation of env map light dots: derived from the verified lookup and the game's 180 degree camera roll,
   not from a pixel comparison.
+* Glass tint and opacity of the headlight and brakelight variants (the capture only has plain smoked glass), and the
+  game's gamma-space blending (Godot blends in linear space after the sRGB conversion).
 * Per-paint-type highlight size/intensity, the real light positions, fog, and how model scale enters the lookup
   (the game does not renormalise the transformed normal; `keep_model_scale` reproduces that).

@@ -72,6 +72,7 @@ func _ready() -> void:
 	car.add_child(sphere)
 
 	_add_chrome_ornaments()
+	_add_glass_ornaments()
 
 	# --- lights: plain OmniLight3D nodes, found automatically by the addon -----------------
 	rig = Node3D.new()
@@ -149,6 +150,51 @@ func _add_chrome_ornaments() -> void:
 	pipe.position = Vector3(c.x + 1.7, y, z)
 	pipe.add_to_group("mc3_exhaust_chrome")
 	car.add_child(pipe)
+
+
+## Three glass test pieces above the chrome row: plain smoked glass, a headlight lens and a brakelight lens.
+## Use the "Headlights on" / "Brakelights on" sliders of the panel to light the lenses up.
+func _add_glass_ornaments() -> void:
+	var box := AABB(Vector3(-2.5, -1.5, -1.3), Vector3(5.0, 1.4, 2.6))
+	if model != null:
+		var mi := _find_mesh(model)
+		if mi != null:
+			box = mi.global_transform * mi.get_aabb()
+	var c := box.get_center()
+	var z := box.position.z + box.size.z + 1.4
+	var y := box.position.y + 2.0
+
+	var smoked := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.5
+	sm.height = 1.0
+	sm.radial_segments = 64
+	sm.rings = 32
+	smoked.mesh = sm
+	smoked.position = Vector3(c.x - 1.6, y, z)
+	smoked.add_to_group("mc3_glass")
+	car.add_child(smoked)
+
+	var head := MeshInstance3D.new()
+	var hm := SphereMesh.new()
+	hm.radius = 0.5
+	hm.height = 1.0
+	hm.radial_segments = 64
+	hm.rings = 32
+	head.mesh = hm
+	head.scale = Vector3(1.0, 0.75, 0.55)
+	head.position = Vector3(c.x, y, z)
+	head.add_to_group("mc3_headlight_glass")
+	car.add_child(head)
+
+	var brake := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.9, 0.3, 0.2)
+	brake.mesh = bm
+	brake.rotation_degrees = Vector3(0.0, 25.0, 0.0)
+	brake.position = Vector3(c.x + 1.7, y, z)
+	brake.add_to_group("mc3_brakelight_glass")
+	car.add_child(brake)
 
 
 func _find_mesh(n: Node) -> MeshInstance3D:

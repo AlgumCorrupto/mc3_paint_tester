@@ -8,13 +8,17 @@ extends Node3D
 ##   group "mc3_chrome"          -> [member chrome_color]
 ##   group "mc3_rim_chrome"      -> [member rim_chrome_color]
 ##   group "mc3_exhaust_chrome"  -> [member exhaust_chrome_color]
+##   group "mc3_glass"           -> alpha blended coloured glass, [member glass_tint] / [member glass_opacity]
+##   group "mc3_headlight_glass" -> glass that lights up with [member headlights_on]
+##   group "mc3_brakelight_glass"-> glass that lights up with [member headlights_on] + [member brakelights_on]
 ##   group "mc3_paint_ignore"    -> skipped
 ## (a group on a parent node applies to all meshes below it)
 ##
 ## Car paint:  paint map (256x256, one glow sprite per light) + env map (256x256, panorama + light glows),
 ##             combined by a shader that does normal indexed (matcap style) lookups.
 ## Chrome:     the same env map, modulated by vertex lighting and a tint.
-## Both were verified against an Xbox capture (see README).
+## Glass:      flat tint + Fresnel weighted env map reflection, alpha blended.
+## Paint and chrome were verified against an Xbox capture, glass was rebuilt from one (see README).
 ##
 ## Lights: every OmniLight3D / SpotLight3D in the scene is used automatically (the game uses the 10 closest
 ## lights), plus [member light_sources] and an optional light attached to the camera.
@@ -27,9 +31,13 @@ const PAINT_MAP_SHADER := preload("shaders/paint_map.gdshader")
 const ENV_MAP_SHADER := preload("shaders/env_map.gdshader")
 const CAR_SHADER := preload("shaders/car_paint.gdshader")
 const CHROME_SHADER := preload("shaders/chrome.gdshader")
+const GLASS_SHADER := preload("shaders/glass.gdshader")
 const SKY_SHADER := preload("shaders/pano_sky.gdshader")
 const IGNORE_GROUP := &"mc3_paint_ignore"
 const CHROME_GROUPS := [&"mc3_chrome", &"mc3_rim_chrome", &"mc3_exhaust_chrome"]
+const GLASS_GROUPS := [&"mc3_glass", &"mc3_headlight_glass", &"mc3_brakelight_glass"]
+## chrome groups first (kinds 0-2), then glass groups (kinds 3-5)
+const SPECIAL_GROUPS := [&"mc3_chrome", &"mc3_rim_chrome", &"mc3_exhaust_chrome", &"mc3_glass", &"mc3_headlight_glass", &"mc3_brakelight_glass"]
 
 ## Used when the scene has no lights and use_fallback_rig is on (metres, relative to the car).
 const FALLBACK_RIG := [
@@ -164,6 +172,29 @@ const FALLBACK_RIG := [
 @export_range(0.5, 2.0, 0.01) var chrome_lookup_k := 1.0
 
 # ---------------------------------------------------------------------------------------
+@export_group("Glass")
+## Plain glass (group mc3_glass). Capture: tint 22/255 grey, opacity 115/255.
+@export_color_no_alpha var glass_tint := Color(0.0863, 0.0863, 0.0863)
+@export_range(0.0, 1.0, 0.001) var glass_opacity := 0.451
+## Headlight glass (group mc3_headlight_glass). Not in the capture: a pale tint to be adjusted.
+@export_color_no_alpha var headlight_glass_tint := Color(0.55, 0.58, 0.62)
+@export_range(0.0, 1.0, 0.001) var headlight_glass_opacity := 0.45
+## Brakelight glass (group mc3_brakelight_glass). Not in the capture: a red tint to be adjusted.
+@export_color_no_alpha var brakelight_glass_tint := Color(0.55, 0.04, 0.04)
+@export_range(0.0, 1.0, 0.001) var brakelight_glass_opacity := 0.55
+## coloredglass_headlightval: lifts the ambient light of headlight glass by 0.5 * this.
+@export_range(0.0, 1.0, 0.01) var headlights_on := 0.0
+## coloredglass_brakelightval: brakelight glass is lifted by 0.5 * headlights_on + 0.5 * this.
+@export_range(0.0, 1.0, 0.01) var brakelights_on := 0.0
+## glassFresnelParams = (0.9, 0.124, 1.0, 1.5): a = glass_position_weight * normal_weight,
+## COLOR0.a = clamp((1 - n.z) * scale, min, max).
+@export_range(0.0, 2.0, 0.001) var glass_position_weight := 0.9
+@export_range(0.0, 1.0, 0.001) var glass_fresnel_min := 0.124
+@export_range(0.0, 1.0, 0.001) var glass_fresnel_max := 1.0
+@export_range(0.0, 3.0, 0.001) var glass_fresnel_scale := 1.5
+@export_range(0.5, 2.0, 0.01) var glass_lookup_k := 1.0
+
+# ---------------------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------------------
 var _paint_vp: SubViewport
@@ -172,6 +203,7 @@ var _paint_mat: ShaderMaterial
 var _env_mat: ShaderMaterial
 var _car_mat: ShaderMaterial
 var _chrome_mats: Array = []
+var _glass_mats: Array = []
 var _sky_mat: ShaderMaterial
 var _sky: Sky
 var _paint_img: Image
@@ -179,7 +211,7 @@ var _paint_tex: ImageTexture
 var _dot_img: Image
 var _dot_tex: ImageTexture
 var _meshes: Array = []
-var _chrome_meshes: Array = [[], [], []]
+var _chrome_meshes: Array = [[], [], [], [], [], []]   # kinds 0-2 chrome, 3-5 glass
 var _scene_lights: Array = []
 var _lights_dirty := true
 var _bounds := AABB(Vector3.ZERO, Vector3.ONE)
@@ -220,6 +252,11 @@ func get_chrome_material(kind: int = 0) -> ShaderMaterial:
 	return _chrome_mats[clampi(kind, 0, 2)]
 
 
+## kind: 0 = glass, 1 = headlight glass, 2 = brakelight glass.
+func get_glass_material(kind: int = 0) -> ShaderMaterial:
+	return _glass_mats[clampi(kind, 0, 2)]
+
+
 ## 256x256 paint ("diffuse") map, useful for debugging.
 func get_paint_texture() -> Texture2D:
 	return _paint_vp.get_texture()
@@ -246,7 +283,7 @@ func get_lookup_scale() -> float:
 ## Re-scan the target for meshes. Call it after adding or removing meshes below the target.
 func refresh_targets() -> void:
 	_meshes.clear()
-	for i in 3:
+	for i in SPECIAL_GROUPS.size():
 		_chrome_meshes[i].clear()
 	var root: Node = target if target != null else get_parent()
 	if root != null:
@@ -258,7 +295,7 @@ func refresh_targets() -> void:
 ## Paint another node (and its MeshInstance3D descendants) with the same materials.
 func apply_to(root: Node) -> void:
 	var paint: Array = []
-	var chrome: Array = [[], [], []]
+	var chrome: Array = [[], [], [], [], [], []]
 	_collect(root, -1, paint, chrome)
 	_assign_materials(paint, chrome)
 
@@ -318,6 +355,12 @@ func _build_maps() -> void:
 		m.shader = CHROME_SHADER
 		m.set_shader_parameter("env_map", _env_vp.get_texture())
 		_chrome_mats.append(m)
+	_glass_mats.clear()
+	for i in 3:
+		var gm := ShaderMaterial.new()
+		gm.shader = GLASS_SHADER
+		gm.set_shader_parameter("env_map", _env_vp.get_texture())
+		_glass_mats.append(gm)
 	_apply_panorama()
 
 
@@ -371,8 +414,8 @@ func _collect(n: Node, inherited: int, paint_out: Array, chrome_out: Array) -> v
 	if n.is_in_group(IGNORE_GROUP):
 		return
 	var kind := inherited
-	for i in CHROME_GROUPS.size():
-		if n.is_in_group(CHROME_GROUPS[i]):
+	for i in SPECIAL_GROUPS.size():
+		if n.is_in_group(SPECIAL_GROUPS[i]):
 			kind = i
 	if n is MeshInstance3D:
 		if kind >= 0:
@@ -389,6 +432,8 @@ func _assign_materials(paint: Array, chrome: Array) -> void:
 	for i in 3:
 		for mi in chrome[i]:
 			mi.material_override = _chrome_mats[i]
+		for mi in chrome[i + 3]:
+			mi.material_override = _glass_mats[i]
 
 
 func _get_camera() -> Camera3D:
@@ -412,10 +457,10 @@ func _rescan_lights() -> void:
 
 
 func _update_bounds() -> void:
-	# the bounds come from the painted meshes; chrome only counts when there is nothing else
+	# the bounds come from the painted meshes; chrome and glass only count when there is nothing else
 	var found := _merge_bounds(_meshes)
 	if not found:
-		for i in 3:
+		for i in SPECIAL_GROUPS.size():
 			if _merge_bounds(_chrome_meshes[i]):
 				found = true
 				break
@@ -635,3 +680,31 @@ func _update_uniforms(cam: Camera3D) -> void:
 		cm.set_shader_parameter("per_pixel_lookup", per_pixel_lookup)
 		cm.set_shader_parameter("reflect_gain", reflection_gain)
 		cm.set_shader_parameter("gamma_correct", gamma_correct)
+
+	# glass: tint + opacity per kind, ambient lift from the headlight / brakelight values (Bind)
+	var glass_scale := _scale_for_fov(glass_lookup_k, fov) if auto_lookup_scale else lookup_scale
+	var glass_tints := [glass_tint, headlight_glass_tint, brakelight_glass_tint]
+	var glass_opacities := [glass_opacity, headlight_glass_opacity, brakelight_glass_opacity]
+	var lifts := [0.0, 0.5 * headlights_on, 0.5 * headlights_on + 0.5 * brakelights_on]
+	for i in 3:
+		var gm: ShaderMaterial = _glass_mats[i]
+		gm.set_shader_parameter("glass_tint", _v3(glass_tints[i]))
+		gm.set_shader_parameter("glass_opacity", glass_opacities[i])
+		gm.set_shader_parameter("light_lift", clampf(lifts[i], 0.0, 1.0))
+		gm.set_shader_parameter("light_dir0", light0_direction)
+		gm.set_shader_parameter("light_dir1", light1_direction)
+		gm.set_shader_parameter("light_dir2", light2_direction)
+		gm.set_shader_parameter("light_col0", _v3(light0_color))
+		gm.set_shader_parameter("light_col1", _v3(light1_color))
+		gm.set_shader_parameter("light_col2", _v3(light2_color))
+		gm.set_shader_parameter("ambient", _v3(ambient))
+		gm.set_shader_parameter("lookup_scale", glass_scale)
+		gm.set_shader_parameter("normal_weight", normal_weight)
+		gm.set_shader_parameter("env_pos_weight", glass_position_weight * normal_weight)
+		gm.set_shader_parameter("keep_model_scale", keep_model_scale)
+		gm.set_shader_parameter("per_pixel_lookup", per_pixel_lookup)
+		gm.set_shader_parameter("fres_min", glass_fresnel_min)
+		gm.set_shader_parameter("fres_max", glass_fresnel_max)
+		gm.set_shader_parameter("fres_scale", glass_fresnel_scale)
+		gm.set_shader_parameter("reflect_gain", reflection_gain)
+		gm.set_shader_parameter("gamma_correct", gamma_correct)
